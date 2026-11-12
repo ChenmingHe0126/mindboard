@@ -131,6 +131,54 @@ function saveSoon() {
   saveTimer = setTimeout(flush, 400);
 }
 let saving = Promise.resolve();
+let baseSnap = null; // 上一次和文件一致时的内容，用来算出「我这边改了什么」
+const takeBase = b => { baseSnap = JSON.parse(JSON.stringify({ nodes: b.nodes, links: b.links || [], name: b.name })); };
+// 子节点的坐标是自动排版算出来的，不算改动
+const sig = n => n && JSON.stringify({ ...n, x: n.parent ? 0 : Math.round(n.x), y: n.parent ? 0 : Math.round(n.y) });
+
+// 文件被别处改了（AI 写入，或另一台设备同步过来）：以文件为底，把我这边的改动叠上去。
+// 同一个节点两边都改了，以我这边为准。返回 true 表示合并结果需要再存一次。
+function applyMerge(R) {
+  const B = baseSnap, before = snap();
+  let mine = false;
+  const nodes = JSON.parse(JSON.stringify(R.nodes));
+  for (const id of new Set([...Object.keys(B.nodes), ...Object.keys(board.nodes)])) {
+    const b = B.nodes[id], l = board.nodes[id];
+    if (!l) { if (b && nodes[id]) { delete nodes[id]; mine = true; } }
+    else if (sig(l) !== sig(b)) { nodes[id] = l; mine = true; }
+  }
+  for (const n of Object.values(nodes)) if (n.parent && !nodes[n.parent]) n.parent = null;
+  for (const n of Object.values(nodes)) n.children = n.children.filter(c => nodes[c] && nodes[c].parent === n.id);
+  for (const n of Object.values(nodes)) if (n.parent && !nodes[n.parent].children.includes(n.id)) nodes[n.parent].children.push(n.id);
+  const had = new Set(B.links.map(l => l.id)), have = new Set(board.links.map(l => l.id));
+  const links = (R.links || []).filter(l => !had.has(l.id) || have.has(l.id));
+  for (const l of board.links) if (!had.has(l.id)) { links.push(l); mine = true; }
+  if (B.links.some(l => !have.has(l.id))) mine = true;
+  board.nodes = nodes;
+  board.links = links.filter(l => nodes[l.from] && nodes[l.to]);
+  board.assets = { ...(R.assets || {}), ...board.assets };
+  if (board.name !== B.name) mine = true;
+  else if (R.name !== board.name) { board.name = R.name; $('#board-name').value = R.name; document.title = R.name + ' · MindBoard'; }
+  baseRev = R.updated;
+  takeBase(R);
+  const after = snap();
+  if (after !== before) {
+    undoStack.push(lastSnap); redoStack = []; lastSnap = after;
+    sel = new Set([...sel].filter(i => nodes[i])); selLink = null;
+    render();
+  }
+  return mine;
+}
+async function mergeAndRetry(b) {
+  try {
+    applyMerge(await api('boards/' + b.id));
+    b.updated = Date.now();
+    await store.put(b, baseRev);
+    baseRev = b.updated; takeBase(b);
+    return true;
+  } catch (err) { console.error(err); return false; }
+}
+const pendingIds = () => Object.values(board.nodes).filter(n => n.ai).map(n => n.id);
 function flush() {
   clearTimeout(saveTimer); saveTimer = 0;
   // 串行保存：上一次写完、拿到新的版本号之后再写下一次
@@ -141,9 +189,11 @@ function flush() {
     try {
       await store.put(b, baseRev);
       baseRev = b.updated;
+      if (remote) takeBase(b);
     } catch (err) {
+      if (err.status === 409 && await mergeAndRetry(b)) return;
       if (err.status === 409) {
-        // 文件在别的设备上被改过：不覆盖对方，把自己这份另存
+        // 合并也没成功（极少见）：不覆盖对方，把自己这份另存
         b.id = uid(); b.name += '（冲突副本）';
         await store.put(b, null);
         baseRev = b.updated;
@@ -160,12 +210,17 @@ function saveView() {
   else saveSoon();
 }
 async function checkRemote() {
-  if (!remote || !board || saveTimer || editing || drag) return;
+  if (!remote || !board || document.hidden || editing || drag || saveTimer) return;
+  await saving;
   try {
     const id = board.id, m = await api('boards/' + id + '?meta=1');
     if (m.updated === baseRev || saveTimer || editing || drag || board.id !== id) return;
-    await openBoard(id);
-    toast('已载入其他设备同步过来的修改');
+    const R = await api('boards/' + id);
+    if (saveTimer || editing || drag || board.id !== id) return;
+    const n0 = pendingIds().length;
+    if (applyMerge(R)) saveSoon();
+    const added = pendingIds().length - n0;
+    toast(added > 0 ? `AI 写入了 ${added} 处，用虚线标出，等你确认` : '画板已同步更新');
   } catch { /* 文件暂时读不到（正在同步）就下次再看 */ }
 }
 
@@ -205,7 +260,7 @@ function render() {
   const walk = (n, d, col) => {
     const c = n.color || col;
     meta.set(n.id, { d, c });
-    if (!n.collapsed) n.children.forEach((id, i) => walk(N(id), d + 1, d === 0 ? BRANCH[i % BRANCH.length] : c));
+    if (!n.collapsed) n.children.forEach((id, i) => walk(N(id), d + 1, d === 0 && !n.inbox ? BRANCH[i % BRANCH.length] : c));
   };
   roots().forEach(r => walk(r, 0, null));
 
@@ -219,6 +274,8 @@ function render() {
     if (sel.has(n.id)) cls.push('sel', sel.size === 1 ? 'solo' : '');
     if (n.children.length) cls.push('parent');
     if (n.collapsed) cls.push('collapsed');
+    if (n.ai) cls.push('ai');
+    if (n.inbox) cls.push('inbox');
     if (editing === n.id) cls.push('editing');
     if (drag && drag.ids && drag.ids.has(n.id)) cls.push('dragging');
     if (drag && drag.target === n.id) cls.push('drop');
@@ -321,6 +378,13 @@ function updateChrome() {
     const kinds = new Set([...sel].map(i => N(i).kind));
     bar.querySelectorAll('[data-kind]').forEach(b => b.classList.toggle('on', kinds.size === 1 && kinds.has(b.dataset.kind)));
   }
+  bar.querySelector('[data-act=ok]').hidden = ![...sel].some(i => N(i).ai);
+  const pend = pendingIds().length;
+  $('#ai-chip').hidden = !pend;
+  $('#ai-show').textContent = `AI 待确认 ${pend}`;
+  const box = Object.values(board.nodes).find(n => n.inbox), cnt = box ? box.children.length : 0;
+  $('#inbox-count').hidden = !cnt;
+  $('#inbox-count').textContent = `收件箱 ${cnt}`;
   $('#empty').hidden = Object.keys(board.nodes).length > 0;
   $('#btn-undo').disabled = !undoStack.length;
   $('#btn-redo').disabled = !redoStack.length;
@@ -401,7 +465,7 @@ function finishEdit() {
     el._k = null;
     if (n) {
       if (!t.trim() && !n.children.length) { removeNode(id); sel.delete(id); commit(); return; }
-      if (t !== n.text) { n.text = t; commit(); return; }
+      if (t !== n.text) { n.text = t; delete n.ai; commit(); return; } // 亲手改过就算确认了
     }
   }
   render();
@@ -596,6 +660,7 @@ async function openBoard(id) {
   if (!b) return false;
   board = b;
   baseRev = b.updated;
+  takeBase(b);
   board.assets ||= {}; board.links ||= []; board.view ||= { x: 0, y: 0, k: 1 };
   try { const v = remote && JSON.parse(localStorage.getItem('mb_view_' + id)); if (v) board.view = v; } catch {}
   const used = new Set(Object.values(board.nodes).map(n => n.src));
@@ -735,9 +800,12 @@ vp.addEventListener('pointerdown', e => {
   const t = e.target, nodeEl = t.closest('.node');
   if (editing && nodeEl && nodeEl.dataset.id === editing) return;
   finishEdit();
+  if (document.activeElement && document.activeElement.matches('button')) document.activeElement.blur(); // 否则空格会触发刚点过的按钮
   if (t.closest('a')) return;
   const v = board.view, base = { sx: e.clientX, sy: e.clientY, moved: false };
-  if (e.button !== 0) { drag = { ...base, type: 'pan', vx: v.x, vy: v.y }; return; }
+  // 右键（或中键）按住拖动 = 平移，在节点上起手也一样；左键在空白处拖动 = 框选
+  if (e.button !== 0) { e.preventDefault(); drag = { ...base, type: 'pan', vx: v.x, vy: v.y }; return; }
+  const marquee = () => ({ ...base, type: 'marquee', p: pt(e), keep: e.shiftKey ? new Set(sel) : new Set(), btn: e.button });
   if (t.closest('.fold')) return;
   if (nodeEl) {
     const id = nodeEl.dataset.id;
@@ -752,7 +820,7 @@ vp.addEventListener('pointerdown', e => {
   }
   const lk = t.closest('[data-link]');
   if (lk) { selLink = lk.dataset.link; sel = new Set(); render(); return; }
-  drag = e.shiftKey ? { ...base, type: 'marquee', p: pt(e) } : { ...base, type: 'pan', vx: v.x, vy: v.y };
+  drag = marquee();
 });
 
 window.addEventListener('pointermove', e => {
@@ -799,7 +867,8 @@ window.addEventListener('pointermove', e => {
     m.hidden = false;
     m.style.cssText = `left:${x0}px;top:${y0}px;width:${x1 - x0}px;height:${y1 - y0}px`;
     const a = toWorld(x0, y0), b = toWorld(x1, y1);
-    sel = new Set([...geo].filter(([, g]) => g.x < b.x && g.x + g.w > a.x && g.y < b.y && g.y + g.h > a.y).map(([i]) => i));
+    selLink = null;
+    sel = new Set([...drag.keep, ...[...geo].filter(([, g]) => g.x < b.x && g.x + g.w > a.x && g.y < b.y && g.y + g.h > a.y).map(([i]) => i)]);
     render();
   }
 });
@@ -829,8 +898,10 @@ window.addEventListener('pointerup', e => {
   } else if (d.type === 'resize') {
     d.moved ? commit() : render();
   } else if (d.type === 'pan') {
-    if (!d.moved && e.button === 0) { sel = new Set(); selLink = null; render(); }
-    saveView();
+    if (d.moved) saveView();
+  } else if (d.type === 'marquee') {
+    if (!d.moved && d.btn === 0 && !d.keep.size) { sel = new Set(); selLink = null; }
+    render();
   } else render();
 });
 
@@ -882,7 +953,7 @@ window.addEventListener('keydown', e => {
     return;
   }
   if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); $('#search').focus(); $('#search').select(); return; }
-  if (e.target.matches('input,textarea,select') || document.querySelector('dialog[open]')) return;
+  if (e.target.matches?.('input,textarea,select') || document.querySelector('dialog[open]')) return;
   const one = sel.size === 1 ? [...sel][0] : null, key = e.key;
   const done = () => e.preventDefault();
   if (mod && key.toLowerCase() === 'z') { done(); e.shiftKey ? redo() : undo(); }
@@ -896,6 +967,7 @@ window.addEventListener('keydown', e => {
   else if (key === 'Delete' || key === 'Backspace') { done(); deleteSelection(); }
   else if (key === '/') { done(); if (one) toggleFold(one); }
   else if (key === '1') { done(); fit(); }
+  else if (key.toLowerCase() === 'n') { done(); $('#capture-input').focus(); }
   else if (key === 'Escape') { sel = new Set(); selLink = null; render(); }
   else if (key.startsWith('Arrow') && one) {
     done();
@@ -962,6 +1034,7 @@ $('#propbar').addEventListener('click', e => {
   }
   else if (b.dataset.act === 'child') { if (one) addChild(one); else toast('先只选中一个节点'); }
   else if (b.dataset.act === 'fold') sel.forEach(i => { const n = N(i); if (n.children.length) n.collapsed = !n.collapsed; }), commit();
+  else if (b.dataset.act === 'ok') { sel.forEach(i => delete N(i).ai); commit(); }
   else if (b.dataset.act === 'del') deleteSelection();
 });
 
@@ -974,6 +1047,41 @@ $('#zoom').addEventListener('click', e => {
   else if (z.dataset.zoom === 'reset') zoomAt(W, H, 1 / board.view.k);
   else fit();
 });
+
+// 速记条：想到什么丢进收件箱，读完再整理（或者让 AI 整理）
+function ensureInbox() {
+  const box = Object.values(board.nodes).find(n => n.inbox);
+  if (box) return box;
+  const b = bounds(), c = center();
+  return addNode({ kind: 'topic', text: '📥 收件箱', inbox: true, color: 'gray', x: b ? b.x - 460 : c.x - 60, y: b ? b.y : c.y - 20 });
+}
+const cap = $('#capture-input');
+$('#capture').addEventListener('submit', e => e.preventDefault());
+cap.addEventListener('keydown', e => {
+  if (e.isComposing || e.keyCode === 229) return;
+  if (e.key === 'Escape') { cap.blur(); return; }
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const t = cap.value.trim();
+  if (!t) return;
+  const box = ensureInbox();
+  box.collapsed = false;
+  addNode({ kind: 'topic', text: t }, box.id);
+  cap.value = '';
+  commit();
+});
+$('#inbox-count').onclick = () => {
+  const box = Object.values(board.nodes).find(n => n.inbox);
+  if (box) { sel = new Set([box.id]); render(); centerOn(box.id); }
+};
+$('#ai-show').onclick = () => {
+  const ids = pendingIds();
+  ids.forEach(i => { for (let p = N(N(i).parent); p; p = N(p.parent)) p.collapsed = false; });
+  sel = new Set(ids);
+  render();
+  if (ids[0]) centerOn(ids[0]);
+};
+$('#ai-ok').onclick = () => { pendingIds().forEach(i => delete N(i).ai); commit(); toast('已全部确认'); };
 
 const search = $('#search');
 let hitIdx = -1;
@@ -1070,7 +1178,7 @@ window.addEventListener('pagehide', () => { if (saveTimer) flush(); });
 // ---------------------------------------------------------------- boot
 (async () => {
   try { const p = await api('ping'); remote = !!p.ok; dataDir = p.dataDir; } catch {}
-  setInterval(checkRemote, 15000);
+  setInterval(checkRemote, 3000);
   const cur = localStorage.getItem('mb_current');
   if (cur && await openBoard(cur)) return;
   const all = await store.all();

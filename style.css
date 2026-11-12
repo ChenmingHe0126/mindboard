@@ -109,10 +109,10 @@ code { font: 12px ui-monospace, Consolas, monospace; background: var(--bg); padd
 
 /* ---------- canvas ---------- */
 #viewport {
-  position: fixed; inset: 0; overflow: hidden; touch-action: none; cursor: grab;
+  position: fixed; inset: 0; overflow: hidden; touch-action: none; cursor: default;
   background-image: radial-gradient(var(--dot) 1.2px, transparent 1.3px);
 }
-#viewport.panning { cursor: grabbing; }
+#viewport.panning, #viewport.panning .node { cursor: grabbing; }
 #world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
 #edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; }
 #edges path { fill: none; }
@@ -172,3 +172,25 @@ code { font: 12px ui-monospace, Consolas, monospace; background: var(--bg); padd
 .node.solo:not(.topic):not(.editing) .resize { display: block; right: -7px; bottom: -7px; width: 12px; height: 12px; border-radius: 3px; background: var(--surface); border: 2px solid var(--focus); cursor: ew-resize; }
 #btn-dir { font-size: 12.5px; border: 1px solid var(--line); margin-top: 4px; }
 .note code { word-break: break-all; }
+
+/* ---------- 收件箱速记条 / AI 待确认 ---------- */
+#capture {
+  position: fixed; z-index: 15; left: 50%; bottom: 10px; transform: translateX(-50%); width: min(560px, calc(100vw - 280px));
+  display: flex; align-items: center; gap: 4px; padding: 4px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+}
+#capture-input { flex: 1; min-width: 0; border: 0; background: none; outline: none; padding: 7px 10px; font-size: 14px; }
+#capture:focus-within { border-color: var(--focus); }
+#inbox-count { flex: none; font-size: 12px; font-weight: 600; white-space: nowrap; background: color-mix(in srgb, var(--c-yellow) 30%, var(--surface)); }
+#ai-chip { display: flex; gap: 2px; font-size: 13px; white-space: nowrap; }
+#ai-show { color: var(--focus); font-weight: 600; border: 1.5px dashed var(--focus); padding: 4px 10px; }
+#ai-ok { color: var(--muted); }
+#propbar .ok { background: var(--focus); color: #fff; font-weight: 600; }
+.node.ai { outline: 2px dashed var(--focus); outline-offset: 3px; }
+.node.ai.sel { outline-style: solid; }
+.node.ai::before {
+  content: "AI"; position: absolute; left: -9px; top: -11px; font: 700 9px/1 system-ui, sans-serif; letter-spacing: .04em;
+  background: var(--focus); color: #fff; padding: 3px 4px; border-radius: 4px;
+}
+.node.topic.d0.inbox { background: var(--surface); color: var(--ink); border: 1.5px dashed var(--c-gray); box-shadow: none; font-size: 15px; padding: 8px 16px; }
+@media (max-width: 760px) { #capture { width: calc(100vw - 150px); left: 16px; transform: none; } }

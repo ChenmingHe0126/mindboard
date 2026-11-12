@@ -43,6 +43,20 @@ def read_json(p):
     return json.loads(p.read_text('utf-8'))
 
 
+_meta = {}
+
+
+def updated_of(p):
+    """画板的版本号。文件没变就用缓存，这样页面每几秒问一次也不用反复读大文件。"""
+    st = p.stat()
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _meta.get(str(p))
+    if not hit or hit[0] != key:
+        hit = (key, read_json(p).get('updated', 0))
+        _meta[str(p)] = hit
+    return hit[1]
+
+
 def set_dir(path):
     d = Path(os.path.expandvars(str(path).strip().strip('"'))).expanduser()
     if not d.is_absolute():
@@ -112,7 +126,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not p:
                         return self.send(404, {'error': 'no such board'})
                     if url.query == 'meta=1':
-                        return self.send(200, {'updated': read_json(p).get('updated', 0)})
+                        return self.send(200, {'updated': updated_of(p)})
                     return self.send(200, p.read_bytes())
                 if method == 'PUT':
                     raw = self.body()
