@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MindBoard · 思维导图 & 头脑风暴白板</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%234f46e5'/><path d='M13 15 L21 10 M13 17 L21 22' stroke='white' stroke-width='1.8'/><circle cx='10' cy='16' r='4.5' fill='white'/><circle cx='23' cy='9' r='3.2' fill='%23ffd43b'/><circle cx='23' cy='23' r='3.2' fill='%2363e6be'/></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <button id="btn-boards" title="所有画板">☰</button>
+  <input id="board-name" spellcheck="false" aria-label="画板名称">
+  <i class="sep"></i>
+  <button id="btn-undo" title="撤销 (Ctrl+Z)">↶</button>
+  <button id="btn-redo" title="重做 (Ctrl+Shift+Z)">↷</button>
+  <span class="grow"></span>
+  <input id="search" type="search" placeholder="搜索节点 (Ctrl+F)">
+  <div class="menu-wrap">
+    <button id="btn-file">文件 ▾</button>
+    <div class="pop" id="file-menu" hidden>
+      <button data-act="new">新建画板 / 选模板…</button>
+      <button data-act="outline">从大纲文本导入…</button>
+      <button data-act="import-json">导入 JSON 备份…</button>
+      <hr>
+      <button data-act="png">导出 PNG 图片</button>
+      <button data-act="md">导出 Markdown 大纲</button>
+      <button data-act="copy-md">复制 Markdown 到剪贴板</button>
+      <button data-act="json">导出 JSON 备份</button>
+    </div>
+  </div>
+  <button id="btn-theme" title="深色 / 浅色">◐</button>
+  <button id="btn-help" title="快捷键与用法">?</button>
+</header>
+
+<aside id="tools">
+  <button data-add="topic" title="添加主题（思维导图的中心 / 分支）"><i class="ic ic-topic"></i><span>主题</span></button>
+  <button data-add="sticky" title="添加便签（头脑风暴）"><i class="ic ic-sticky"></i><span>便签</span></button>
+  <button data-add="card" title="添加卡片（文献 / 分镜，首行为标题）"><i class="ic ic-card"></i><span>卡片</span></button>
+  <button data-add="image" title="添加图片（也可以直接粘贴 / 拖入）"><i class="ic ic-image"></i><span>图片</span></button>
+</aside>
+
+<div id="propbar" hidden>
+  <span id="swatches"></span>
+  <i class="sep"></i>
+  <button data-kind="topic">主题</button>
+  <button data-kind="sticky">便签</button>
+  <button data-kind="card">卡片</button>
+  <i class="sep"></i>
+  <button data-act="child" title="Tab">＋子节点</button>
+  <button data-act="fold" title="/">折叠</button>
+  <button data-act="del" title="Delete">删除</button>
+</div>
+
+<main id="viewport">
+  <div id="world">
+    <svg id="edges" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,1 L10,5 L0,9 z"/>
+        </marker>
+      </defs>
+      <g id="edge-g"></g>
+    </svg>
+  </div>
+  <div id="marquee" hidden></div>
+  <div id="empty" hidden>
+    <b>这块画板还是空的</b>
+    <span>双击空白处加一张便签，或点左侧「主题」开始画思维导图</span>
+  </div>
+</main>
+
+<div id="hint">Tab 子节点 · Enter 同级 · 双击编辑 · 拖到另一个节点上 = 挂为子节点 · 拖右上角圆点 = 连线</div>
+
+<div id="zoom">
+  <button data-zoom="out" title="缩小">−</button>
+  <button data-zoom="reset" id="zoom-label" title="回到 100%">100%</button>
+  <button data-zoom="in" title="放大">＋</button>
+  <button data-zoom="fit" title="适应屏幕 (1)">⤢</button>
+</div>
+
+<aside id="drawer" hidden>
+  <div class="drawer-head"><b>我的画板</b><button id="drawer-new">＋ 新建</button></div>
+  <div id="board-list"></div>
+  <p class="note">数据只保存在这台电脑的这个浏览器里。换设备或清缓存前，请用「文件 → 导出 JSON 备份」。</p>
+</aside>
+
+<dialog id="dlg-tpl">
+  <h2>新建画板</h2>
+  <p class="sub">选一个起点，之后都可以随便改。</p>
+  <div id="tpl-list"></div>
+  <form method="dialog"><button class="close">取消</button></form>
+</dialog>
+
+<dialog id="dlg-outline">
+  <h2>从大纲文本导入</h2>
+  <p class="sub">粘贴 Markdown 标题 / 缩进列表，每一行变成一个节点，缩进决定层级。</p>
+  <textarea id="outline-text" spellcheck="false" placeholder="# 中心主题&#10;## 分支 A&#10;- 要点 1&#10;  - 细节&#10;- 要点 2&#10;## 分支 B"></textarea>
+  <div class="row">
+    <button id="outline-ok" class="primary">导入到当前画板</button>
+    <form method="dialog"><button class="close">取消</button></form>
+  </div>
+</dialog>
+
+<dialog id="dlg-help">
+  <h2>用法与快捷键</h2>
+  <div class="help-grid">
+    <section>
+      <h3>思维导图</h3>
+      <p><kbd>Tab</kbd> 添加子节点</p>
+      <p><kbd>Enter</kbd> 添加同级节点</p>
+      <p><kbd>F2</kbd> / <kbd>空格</kbd> / 双击 编辑</p>
+      <p><kbd>/</kbd> 折叠 / 展开分支</p>
+      <p><kbd>Alt</kbd>+<kbd>↑↓</kbd> 调整同级顺序</p>
+      <p><kbd>↑↓←→</kbd> 在节点间移动</p>
+      <p>把节点拖到另一个节点上 → 成为它的子节点；拖到空白处 → 独立出来</p>
+    </section>
+    <section>
+      <h3>白板</h3>
+      <p>拖空白处平移，滚轮缩放</p>
+      <p><kbd>Shift</kbd>+拖动 框选，<kbd>Shift</kbd>+点击 多选</p>
+      <p>双击空白处 → 新便签</p>
+      <p>选中节点后拖右上角圆点到另一节点 → 连线；双击连线加标签</p>
+      <p>拖右下角方块 → 调整便签 / 卡片 / 图片宽度</p>
+      <p>按住 <kbd>Alt</kbd> 拖动 → 只移动、不挂接</p>
+      <p><kbd>1</kbd> 适应屏幕</p>
+    </section>
+    <section>
+      <h3>编辑</h3>
+      <p>主题：<kbd>Enter</kbd> 完成，<kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</p>
+      <p>便签 / 卡片：<kbd>Enter</kbd> 换行，<kbd>Ctrl</kbd>+<kbd>Enter</kbd> 或 <kbd>Esc</kbd> 完成</p>
+      <p>卡片第一行自动成为标题；<code>#标签</code>、<code>**加粗**</code>、网址会自动识别</p>
+      <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> 撤销 / 重做</p>
+      <p><kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>V</kbd> / <kbd>D</kbd> 复制 / 粘贴 / 原地复制</p>
+      <p>直接粘贴图片或多行大纲文本也可以</p>
+    </section>
+  </div>
+  <form method="dialog"><button class="close">知道了</button></form>
+</dialog>
+
+<input type="file" id="file-img" accept="image/*" multiple hidden>
+<input type="file" id="file-json" accept=".json,application/json" hidden>
+<div id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
