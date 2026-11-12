@@ -36,6 +36,24 @@ const db = {
   del(id) { return this.tx('readwrite', s => s.delete(id)); },
 };
 
+// 用 server.py 打开时（remote = true）画板存成文件夹里的文件；否则退回浏览器 IndexedDB
+let remote = false, dataDir = '', baseRev = null;
+async function api(path, opt) {
+  const r = await fetch('api/' + path, opt);
+  if (!r.ok) { const e = new Error('HTTP ' + r.status); e.status = r.status; throw e; }
+  return r.json();
+}
+const store = {
+  all: () => remote ? api('boards')
+    : db.all().then(l => l.map(b => ({ id: b.id, name: b.name, updated: b.updated, count: Object.keys(b.nodes).length }))),
+  get: id => remote ? api('boards/' + id).catch(() => null) : db.get(id),
+  put: (b, base) => remote ? api('boards/' + b.id, {
+    method: 'PUT', body: JSON.stringify(b),
+    headers: { 'Content-Type': 'application/json', 'X-Base': base == null ? '' : String(base) },
+  }) : db.put(b),
+  del: id => remote ? api('boards/' + id, { method: 'DELETE' }) : db.del(id),
+};
+
 // ---------------------------------------------------------------- state
 let board = null;
 const els = new Map();   // id -> DOM element
@@ -112,11 +130,43 @@ function saveSoon() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flush, 400);
 }
-async function flush() {
+let saving = Promise.resolve();
+function flush() {
   clearTimeout(saveTimer); saveTimer = 0;
-  if (!board) return;
-  board.updated = Date.now();
-  await db.put(board);
+  // 串行保存：上一次写完、拿到新的版本号之后再写下一次
+  return saving = saving.then(async () => {
+    const b = board;
+    if (!b) return;
+    b.updated = Date.now();
+    try {
+      await store.put(b, baseRev);
+      baseRev = b.updated;
+    } catch (err) {
+      if (err.status === 409) {
+        // 文件在别的设备上被改过：不覆盖对方，把自己这份另存
+        b.id = uid(); b.name += '（冲突副本）';
+        await store.put(b, null);
+        baseRev = b.updated;
+        localStorage.setItem('mb_current', b.id);
+        $('#board-name').value = b.name;
+        toast('另一台设备也改了这个画板，你的版本已另存为「冲突副本」');
+      } else { console.error(err); toast('保存失败：本地服务没有响应'); }
+    }
+  });
+}
+// 视图（平移 / 缩放）在文件模式下只记在本机，免得每次拖动画布都触发网盘同步
+function saveView() {
+  if (remote) localStorage.setItem('mb_view_' + board.id, JSON.stringify(board.view));
+  else saveSoon();
+}
+async function checkRemote() {
+  if (!remote || !board || saveTimer || editing || drag) return;
+  try {
+    const id = board.id, m = await api('boards/' + id + '?meta=1');
+    if (m.updated === baseRev || saveTimer || editing || drag || board.id !== id) return;
+    await openBoard(id);
+    toast('已载入其他设备同步过来的修改');
+  } catch { /* 文件暂时读不到（正在同步）就下次再看 */ }
 }
 
 // ---------------------------------------------------------------- rendering
@@ -287,7 +337,7 @@ function zoomAt(sx, sy, f) {
   v.x = sx - (sx - v.x) * k / v.k;
   v.y = sy - (sy - v.y) * k / v.k;
   v.k = k;
-  applyView(); saveSoon();
+  applyView(); saveView();
 }
 function bounds() {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -304,7 +354,7 @@ function fit() {
     v.x = W / 2 + 20 - (b.x + b.w / 2) * v.k;
     v.y = H / 2 + 20 - (b.y + b.h / 2) * v.k;
   }
-  applyView(); saveSoon();
+  applyView(); saveView();
 }
 function reveal(id) {
   const g = geo.get(id), v = board.view;
@@ -320,7 +370,7 @@ function centerOn(id) {
   if (!g) return;
   v.x = vp.clientWidth / 2 - (g.x + g.w / 2) * v.k;
   v.y = vp.clientHeight / 2 - (g.y + g.h / 2) * v.k;
-  applyView(); saveSoon();
+  applyView(); saveView();
 }
 
 // ---------------------------------------------------------------- editing
@@ -542,10 +592,12 @@ const TEMPLATES = [
 async function openBoard(id) {
   finishEdit();
   if (saveTimer) await flush();
-  const b = await db.get(id);
+  const b = await store.get(id);
   if (!b) return false;
   board = b;
+  baseRev = b.updated;
   board.assets ||= {}; board.links ||= []; board.view ||= { x: 0, y: 0, k: 1 };
+  try { const v = remote && JSON.parse(localStorage.getItem('mb_view_' + id)); if (v) board.view = v; } catch {}
   const used = new Set(Object.values(board.nodes).map(n => n.src));
   for (const k of Object.keys(board.assets)) if (!used.has(k)) delete board.assets[k];
   els.forEach(el => el.remove()); els.clear();
@@ -562,22 +614,26 @@ async function newBoard(tpl, name) {
   if (saveTimer) await flush();
   board = { id: uid(), name: name || (tpl.id === 'blank' ? '未命名画板' : tpl.name), created: Date.now(), updated: Date.now(), view: { x: 0, y: 0, k: 1 }, nodes: {}, links: [], assets: {} };
   tpl.make();
-  await db.put(board);
+  await store.put(board, null);
   await openBoard(board.id);
   fit();
 }
 async function renderDrawer() {
-  const list = (await db.all()).sort((a, b) => b.updated - a.updated);
+  const list = (await store.all()).sort((a, b) => b.updated - a.updated);
   const box = $('#board-list');
   box.innerHTML = '';
+  $('#store-note').innerHTML = remote
+    ? `画板以文件形式保存在：<br><code>${esc(dataDir)}</code><br>把这个文件夹放进 Google Drive / OneDrive 的同步目录，其他设备就能看到同一批画板。`
+    : '现在是纯浏览器模式：数据只在这个浏览器里。用 <code>python server.py</code> 启动，就能把画板存成文件、通过网盘同步。';
+  $('#btn-dir').hidden = !remote;
   for (const b of list) {
     const row = document.createElement('div');
     row.className = 'board-row' + (b.id === board.id ? ' cur' : '');
-    row.innerHTML = `<div class="nm"><b>${esc(b.name)}</b><small>${Object.keys(b.nodes).length} 个节点 · ${new Date(b.updated).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</small></div><button class="rm" title="删除画板">✕</button>`;
+    row.innerHTML = `<div class="nm"><b>${esc(b.name)}</b><small>${b.count} 个节点 · ${new Date(b.updated).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</small></div><button class="rm" title="删除画板">✕</button>`;
     row.onclick = async e => {
       if (e.target.closest('.rm')) {
         if (!confirm(`删除画板「${b.name}」？此操作无法撤销。`)) return;
-        await db.del(b.id);
+        await store.del(b.id);
         if (b.id === board.id) {
           clearTimeout(saveTimer); saveTimer = 0;
           const rest = list.filter(x => x.id !== b.id);
@@ -774,7 +830,7 @@ window.addEventListener('pointerup', e => {
     d.moved ? commit() : render();
   } else if (d.type === 'pan') {
     if (!d.moved && e.button === 0) { sel = new Set(); selLink = null; render(); }
-    saveSoon();
+    saveView();
   } else render();
 });
 
@@ -805,7 +861,7 @@ vp.addEventListener('wheel', e => {
   const v = board.view, p = pt(e);
   const mouse = e.deltaX === 0 && Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 50;
   if (e.ctrlKey || e.metaKey || mouse) zoomAt(p.sx, p.sy, Math.exp(-e.deltaY * (mouse ? 0.0015 : 0.01)));
-  else { v.x -= e.deltaX; v.y -= e.deltaY; applyView(); saveSoon(); }
+  else { v.x -= e.deltaX; v.y -= e.deltaY; applyView(); saveView(); }
 }, { passive: false });
 vp.addEventListener('dragover', e => e.preventDefault());
 vp.addEventListener('drop', e => {
@@ -963,7 +1019,7 @@ $('#file-json').addEventListener('change', async e => {
     if (!b.nodes || typeof b.nodes !== 'object') throw 0;
     if (saveTimer) await flush();
     b.id = uid(); b.updated = Date.now(); b.name ||= f.name.replace(/\.(mindboard\.)?json$/, '');
-    await db.put(b);
+    await store.put(b, null);
     await openBoard(b.id);
     toast('已导入为新画板');
   } catch { toast('这个文件不是 MindBoard 的备份'); }
@@ -985,7 +1041,21 @@ $('#tpl-list').addEventListener('click', async e => {
 });
 $('#btn-boards').onclick = () => { const d = $('#drawer'); d.hidden = !d.hidden; if (!d.hidden) renderDrawer(); };
 $('#drawer-new').onclick = () => { $('#drawer').hidden = true; $('#dlg-tpl').showModal(); };
-$('#btn-help').onclick = () => $('#dlg-help').showModal();
+$('#btn-dir').onclick = async () => {
+  const p = prompt('画板保存到哪个文件夹？粘贴完整路径，比如 Google Drive 同步目录下的一个文件夹。', dataDir);
+  if (!p || p.trim() === dataDir) return;
+  finishEdit();
+  if (saveTimer) flush();
+  await saving;
+  try {
+    dataDir = (await api('config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dataDir: p }) })).dataDir;
+  } catch { return toast('这个路径用不了，检查一下有没有写错'); }
+  const all = await store.all();
+  if (all.length) await openBoard(all.sort((a, b) => b.updated - a.updated)[0].id); else await newBoard(TEMPLATES[0]);
+  renderDrawer();
+  toast('已切换保存文件夹');
+};
+$('#btn-help').onclick =() => $('#dlg-help').showModal();
 document.querySelectorAll('dialog').forEach(d => d.addEventListener('click', e => { if (e.target === d) d.close(); }));
 
 const setTheme = t => { document.documentElement.dataset.theme = t; localStorage.setItem('mb_theme', t); };
@@ -993,14 +1063,17 @@ $('#btn-theme').onclick = () => setTheme(document.documentElement.dataset.theme 
 document.documentElement.dataset.theme = localStorage.getItem('mb_theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
 
 window.addEventListener('resize', () => board && render());
-document.addEventListener('visibilitychange', () => { if (document.hidden && saveTimer) flush(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { if (saveTimer) flush(); } else checkRemote(); });
+window.addEventListener('focus', checkRemote);
 window.addEventListener('pagehide', () => { if (saveTimer) flush(); });
 
 // ---------------------------------------------------------------- boot
 (async () => {
+  try { const p = await api('ping'); remote = !!p.ok; dataDir = p.dataDir; } catch {}
+  setInterval(checkRemote, 15000);
   const cur = localStorage.getItem('mb_current');
   if (cur && await openBoard(cur)) return;
-  const all = await db.all();
+  const all = await store.all();
   if (all.length) { await openBoard(all.sort((a, b) => b.updated - a.updated)[0].id); return; }
   await newBoard(TEMPLATES[0]);
   $('#dlg-tpl').showModal();

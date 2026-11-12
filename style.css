@@ -170,3 +170,5 @@ code { font: 12px ui-monospace, Consolas, monospace; background: var(--bg); padd
 .link-handle, .resize { position: absolute; display: none; }
 .node.solo:not(.editing) .link-handle { display: block; right: -9px; top: -9px; width: 15px; height: 15px; border-radius: 50%; background: var(--focus); border: 2.5px solid var(--surface); cursor: crosshair; box-shadow: var(--shadow); }
 .node.solo:not(.topic):not(.editing) .resize { display: block; right: -7px; bottom: -7px; width: 12px; height: 12px; border-radius: 3px; background: var(--surface); border: 2px solid var(--focus); cursor: ew-resize; }
+#btn-dir { font-size: 12.5px; border: 1px solid var(--line); margin-top: 4px; }
+.note code { word-break: break-all; }

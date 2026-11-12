@@ -1,1 +1,4 @@
 .claude/
+boards/
+mindboard.config.json
+__pycache__/
